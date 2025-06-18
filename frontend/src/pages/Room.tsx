@@ -14,8 +14,14 @@ import {
   BsHandIndexThumb,
   BsSun,
   BsMoon,
+  BsGear,
+  BsGraphUp,
+  BsTools,
 } from "react-icons/bs";
 import { MdCallEnd } from "react-icons/md";
+import PerformanceMonitor from "../components/PerformanceMonitor";
+import RoomMetricsDisplay from "../components/RoomMetricsDisplay";
+import LoadTester from "../components/LoadTester";
 
 // Separate component for video element to avoid re-rendering issues
 const VideoElement = ({
@@ -245,6 +251,10 @@ const Room = () => {
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [isHandRaised, setIsHandRaised] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [isPerformanceMonitorOpen, setIsPerformanceMonitorOpen] =
+    useState(false);
+  const [isRoomMetricsOpen, setIsRoomMetricsOpen] = useState(false);
+  const [isLoadTesterOpen, setIsLoadTesterOpen] = useState(false);
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState<
     Array<{ text: string; timestamp: Date; sender: string }>
@@ -607,7 +617,7 @@ const Room = () => {
         removePeerConnection(userId);
       }
     };
-  }, []); // Empty dependency array means this runs only on unmount
+  }, []);
 
   return (
     <div
@@ -619,7 +629,7 @@ const Room = () => {
         {/* Theme toggle button */}
         <button
           onClick={toggleTheme}
-          className={`absolute top-4 right-20 z-20 p-3 rounded-full transition-all duration-300 ${
+          className={`absolute top-4 right-72 z-20 p-3 rounded-full transition-all duration-300 ${
             theme === "dark"
               ? "bg-gray-800 hover:bg-gray-700 text-yellow-400"
               : "bg-white hover:bg-gray-100 text-gray-700 shadow-lg"
@@ -941,6 +951,65 @@ const Room = () => {
           </div>
         </div>
       </details>
+
+      {/* Performance Monitor */}
+      <PerformanceMonitor
+        connectedUsers={connectedUsers}
+        isVisible={isPerformanceMonitorOpen}
+        onToggle={() => setIsPerformanceMonitorOpen(!isPerformanceMonitorOpen)}
+      />
+
+      {/* Room Metrics Display */}
+      <RoomMetricsDisplay
+        isVisible={isRoomMetricsOpen}
+        onToggle={() => setIsRoomMetricsOpen(!isRoomMetricsOpen)}
+      />
+
+      {/* Load Tester */}
+      <LoadTester
+        isVisible={isLoadTesterOpen}
+        onToggle={() => setIsLoadTesterOpen(!isLoadTesterOpen)}
+        serverUrl="http://localhost:8001"
+      />
+
+      {/* Performance monitor toggle button */}
+      <button
+        onClick={() => setIsPerformanceMonitorOpen(!isPerformanceMonitorOpen)}
+        className={`absolute top-4 right-56 p-3 rounded-full hover:opacity-80 transition-all duration-300 z-10 ${
+          theme === "dark"
+            ? "bg-green-600 text-white"
+            : "bg-green-600 text-white shadow-lg"
+        }`}
+        title="Toggle Performance Monitor"
+      >
+        <BsGear />
+      </button>
+
+      {/* Room metrics toggle button */}
+      <button
+        onClick={() => setIsRoomMetricsOpen(!isRoomMetricsOpen)}
+        className={`absolute top-4 right-40 p-3 rounded-full hover:opacity-80 transition-all duration-300 z-10 ${
+          theme === "dark"
+            ? "bg-purple-600 text-white"
+            : "bg-purple-600 text-white shadow-lg"
+        }`}
+        title="Toggle Room Metrics"
+      >
+        <BsGraphUp />
+      </button>
+
+      {/* Load tester toggle button */}
+      <button
+        onClick={() => setIsLoadTesterOpen(!isLoadTesterOpen)}
+        className={`absolute top-4 right-24 p-3 rounded-full hover:opacity-80 transition-all duration-300 z-10 ${
+          theme === "dark"
+            ? "bg-orange-600 text-white"
+            : "bg-orange-600 text-white shadow-lg"
+        }`}
+        title="Toggle Load Tester"
+      >
+        <BsTools />
+      </button>
     </div>
   );
 };

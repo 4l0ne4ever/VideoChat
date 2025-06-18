@@ -12,6 +12,10 @@ const emailToSocketMapping = new Map();
 const socketToEmailMapping = new Map();
 const socketToRoomMapping = new Map();
 
+// Performance metrics storage
+const performanceMetrics = new Map(); // roomId -> metrics array
+const roomMetrics = new Map(); // roomId -> aggregated metrics
+
 io.on('connection', (socket) => {
     socket.on("join-room", (data) =>{
         const {roomId, emailId} = data;
@@ -86,6 +90,49 @@ io.on('connection', (socket) => {
         socket.emit('disconnect-acknowledged');
     })
 
+    // Handle performance metrics from clients
+    socket.on('performance-metrics', (data) => {
+        const emailId = socketToEmailMapping.get(socket.id);
+        const roomId = socketToRoomMapping.get(socket.id);
+        
+        if (emailId && roomId) {
+            const { timestamp, metrics } = data;
+            
+            // Store individual user metrics
+            if (!performanceMetrics.has(roomId)) {
+                performanceMetrics.set(roomId, []);
+            }
+            
+            const roomMetricsArray = performanceMetrics.get(roomId);
+            roomMetricsArray.push({
+                userId: emailId,
+                timestamp,
+                ...metrics
+            });
+            
+            // Keep only last 1000 metrics per room to prevent memory issues
+            if (roomMetricsArray.length > 1000) {
+                roomMetricsArray.splice(0, roomMetricsArray.length - 1000);
+            }
+            
+            // Calculate room aggregate metrics
+            calculateRoomMetrics(roomId);
+            
+            console.log(`Received performance metrics from ${emailId} in room ${roomId}`);
+        }
+    })
+
+    // Handle performance metrics query
+    socket.on('get-room-metrics', () => {
+        const emailId = socketToEmailMapping.get(socket.id);
+        const roomId = socketToRoomMapping.get(socket.id);
+        
+        if (emailId && roomId) {
+            const metrics = roomMetrics.get(roomId) || null;
+            socket.emit('room-metrics', metrics);
+        }
+    })
+
     socket.on('disconnect', () => {
         const emailId = socketToEmailMapping.get(socket.id);
         const roomId = socketToRoomMapping.get(socket.id);
@@ -102,6 +149,127 @@ io.on('connection', (socket) => {
         }
     })
 })
+
+// Calculate aggregated metrics for a room
+function calculateRoomMetrics(roomId) {
+    const roomMetricsArray = performanceMetrics.get(roomId) || [];
+    
+    if (roomMetricsArray.length === 0) {
+        return;
+    }
+    
+    // Get recent metrics (last 30 seconds)
+    const thirtySecondsAgo = Date.now() - 30000;
+    const recentMetrics = roomMetricsArray.filter(m => m.timestamp > thirtySecondsAgo);
+    
+    if (recentMetrics.length === 0) {
+        return;
+    }
+    
+    // Calculate averages
+    const totalUsers = new Set(recentMetrics.map(m => m.userId)).size;
+    const avgLatency = recentMetrics.reduce((sum, m) => sum + (m.averageLatency || 0), 0) / recentMetrics.length;
+    const avgPacketLoss = recentMetrics.reduce((sum, m) => sum + (m.totalPacketLoss || 0), 0) / recentMetrics.length;
+    const avgJitter = recentMetrics.reduce((sum, m) => sum + (m.averageJitter || 0), 0) / recentMetrics.length;
+    
+    // Count quality distributions
+    const videoQualityCounts = {};
+    const audioQualityCounts = {};
+    
+    recentMetrics.forEach(m => {
+        const vq = m.videoQuality || 'unknown';
+        const aq = m.audioQuality || 'unknown';
+        videoQualityCounts[vq] = (videoQualityCounts[vq] || 0) + 1;
+        audioQualityCounts[aq] = (audioQualityCounts[aq] || 0) + 1;
+    });
+    
+    // Determine dominant quality
+    const dominantVideoQuality = Object.keys(videoQualityCounts).reduce((a, b) => 
+        videoQualityCounts[a] > videoQualityCounts[b] ? a : b, 'unknown');
+    const dominantAudioQuality = Object.keys(audioQualityCounts).reduce((a, b) => 
+        audioQualityCounts[a] > audioQualityCounts[b] ? a : b, 'unknown');
+    
+    const aggregatedMetrics = {
+        roomId,
+        totalUsers,
+        averageLatency: Math.round(avgLatency),
+        averagePacketLoss: Math.round(avgPacketLoss * 100) / 100,
+        averageJitter: Math.round(avgJitter * 100) / 100,
+        dominantVideoQuality,
+        dominantAudioQuality,
+        videoQualityDistribution: videoQualityCounts,
+        audioQualityDistribution: audioQualityCounts,
+        sampleCount: recentMetrics.length,
+        lastUpdated: Date.now()
+    };
+    
+    roomMetrics.set(roomId, aggregatedMetrics);
+    
+    // Broadcast room metrics to all users in the room
+    io.to(roomId).emit('room-metrics-update', aggregatedMetrics);
+}
+
+// API endpoint to get room performance metrics
+app.get('/api/room-metrics/:roomId', (req, res) => {
+    const { roomId } = req.params;
+    const metrics = roomMetrics.get(roomId);
+    
+    if (metrics) {
+        res.json(metrics);
+    } else {
+        res.status(404).json({ error: 'Room not found or no metrics available' });
+    }
+});
+
+// API endpoint to get all performance metrics for analysis
+app.get('/api/performance-data/:roomId', (req, res) => {
+    const { roomId } = req.params;
+    const rawMetrics = performanceMetrics.get(roomId) || [];
+    
+    // Get query parameters for filtering
+    const { startTime, endTime, userId } = req.query;
+    
+    let filteredMetrics = rawMetrics;
+    
+    if (startTime) {
+        const start = new Date(startTime).getTime();
+        filteredMetrics = filteredMetrics.filter(m => m.timestamp >= start);
+    }
+    
+    if (endTime) {
+        const end = new Date(endTime).getTime();
+        filteredMetrics = filteredMetrics.filter(m => m.timestamp <= end);
+    }
+    
+    if (userId) {
+        filteredMetrics = filteredMetrics.filter(m => m.userId === userId);
+    }
+    
+    res.json({
+        roomId,
+        metricsCount: filteredMetrics.length,
+        metrics: filteredMetrics
+    });
+});
+
+// Clean up old metrics periodically (every 5 minutes)
+setInterval(() => {
+    const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
+    
+    for (const [roomId, metrics] of performanceMetrics.entries()) {
+        const filteredMetrics = metrics.filter(m => m.timestamp > fiveMinutesAgo);
+        
+        if (filteredMetrics.length === 0) {
+            // Remove empty rooms
+            performanceMetrics.delete(roomId);
+            roomMetrics.delete(roomId);
+        } else {
+            performanceMetrics.set(roomId, filteredMetrics);
+        }
+    }
+    
+    console.log(`Cleaned up old metrics. Active rooms: ${performanceMetrics.size}`);
+}, 5 * 60 * 1000);
 
 app.listen(8000, () => console.log('HTTP Server started on port 8000'));
 io.listen(8001);
