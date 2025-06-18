@@ -10,12 +10,15 @@ const app = express();
 app.use(bodyParser.json());
 const emailToSocketMapping = new Map();
 const socketToEmailMapping = new Map();
+const socketToRoomMapping = new Map();
+
 io.on('connection', (socket) => {
     socket.on("join-room", (data) =>{
         const {roomId, emailId} = data;
         console.log("User joined room", data);
         emailToSocketMapping.set(emailId, socket.id);
         socketToEmailMapping.set(socket.id, emailId);
+        socketToRoomMapping.set(socket.id, roomId);
         socket.join(roomId);
         socket.emit("joined-room", {roomId});
         socket.broadcast.to(roomId).emit("user-joined", {emailId});
@@ -27,7 +30,38 @@ io.on('connection', (socket) => {
         const socketId = emailToSocketMapping.get(emailId);
         socket.to(socketId).emit("incomming-call", {from: fromEmail, offer});
     })
+
+    socket.on('call-accepted', (data)=>{
+        const {emailId, ans} = data;
+        const fromEmail = socketToEmailMapping.get(socket.id);
+        const socketId = emailToSocketMapping.get(emailId);
+        socket.to(socketId).emit('call-accepted', {ans, from: fromEmail})
+    })
+
+    socket.on('ice-candidate', (data) => {
+        const {emailId, candidate} = data;
+        const fromEmail = socketToEmailMapping.get(socket.id);
+        const socketId = emailToSocketMapping.get(emailId);
+        socket.to(socketId).emit('ice-candidate', {candidate, from: fromEmail});
+    })
+
+    socket.on('disconnect', () => {
+        const emailId = socketToEmailMapping.get(socket.id);
+        const roomId = socketToRoomMapping.get(socket.id);
+
+        if (emailId && roomId) {
+            console.log(`User ${emailId} disconnected from room ${roomId}`);
+            // Notify other users in the room that this user left
+            socket.broadcast.to(roomId).emit("user-left", {emailId});
+
+            // Clean up mappings
+            emailToSocketMapping.delete(emailId);
+            socketToEmailMapping.delete(socket.id);
+            socketToRoomMapping.delete(socket.id);
+        }
+    })
 })
 
-app.listen(8000, () => console.log('Server started'));
-io.listen(8001, () => console.log('Socket.io server started'));
+app.listen(8000, () => console.log('HTTP Server started on port 8000'));
+io.listen(8001);
+console.log('Socket.io server started on port 8001');
