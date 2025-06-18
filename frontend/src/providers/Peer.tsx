@@ -29,6 +29,7 @@ type PeerContextType = {
   remoteStreams: Map<string, MediaStream>;
   removePeerConnection: (userId: string) => void;
   getConnectionStats: (userId: string) => Promise<RTCStatsReport | null>;
+  getPendingIceCandidates: () => Map<string, RTCIceCandidate[]>;
 } | null;
 
 export interface SendStream {
@@ -50,6 +51,9 @@ export const PeerProvider = (props: React.PropsWithChildren<{}>) => {
   const [remoteStreams, setRemoteStreams] = React.useState<
     Map<string, MediaStream>
   >(new Map());
+  const [pendingIceCandidates, setPendingIceCandidates] = React.useState<
+    Map<string, RTCIceCandidate[]>
+  >(new Map());
 
   const createPeerConnection = useCallback(
     (
@@ -58,7 +62,28 @@ export const PeerProvider = (props: React.PropsWithChildren<{}>) => {
       onIceCandidate?: (candidate: RTCIceCandidate) => void
     ) => {
       if (peerConnections.has(userId)) {
-        return peerConnections.get(userId)!;
+        const existingPeer = peerConnections.get(userId)!;
+
+        // Add local stream to existing peer if provided and not already added
+        if (localStream) {
+          const tracks = localStream.getTracks();
+          const senders = existingPeer.getSenders();
+
+          tracks.forEach((track) => {
+            const alreadyAdded = senders.some(
+              (sender) => sender.track === track
+            );
+            if (!alreadyAdded) {
+              console.log(
+                `Adding track to existing peer for ${userId}:`,
+                track.kind
+              );
+              existingPeer.addTrack(track, localStream);
+            }
+          });
+        }
+
+        return existingPeer;
       }
 
       const peer = new RTCPeerConnection({
@@ -69,6 +94,22 @@ export const PeerProvider = (props: React.PropsWithChildren<{}>) => {
               "stun:global.stun.twilio.com:3478",
             ],
           },
+          // Add free TURN servers for better connectivity
+          {
+            urls: "turn:openrelay.metered.ca:80",
+            username: "openrelayproject",
+            credential: "openrelayproject",
+          },
+          {
+            urls: "turn:openrelay.metered.ca:443",
+            username: "openrelayproject",
+            credential: "openrelayproject",
+          },
+          {
+            urls: "turn:openrelay.metered.ca:443?transport=tcp",
+            username: "openrelayproject",
+            credential: "openrelayproject",
+          },
         ],
       });
 
@@ -76,16 +117,61 @@ export const PeerProvider = (props: React.PropsWithChildren<{}>) => {
       if (localStream) {
         const tracks = localStream.getTracks();
         tracks.forEach((track) => {
+          console.log(`Adding local track to peer for ${userId}:`, track.kind);
           peer.addTrack(track, localStream);
         });
-      }
-
-      // Handle incoming tracks
+      } // Handle incoming tracks - debounce to prevent multiple rapid updates
+      const trackTimeouts = new Map<string, NodeJS.Timeout>();
       peer.addEventListener("track", (e: RTCTrackEvent) => {
+        console.log(`Received track event for ${userId}`, {
+          streams: e.streams,
+          track: e.track,
+          trackKind: e.track.kind,
+          trackId: e.track.id,
+          trackEnabled: e.track.enabled,
+          trackReadyState: e.track.readyState,
+        });
+
         const streams = e.streams;
         if (streams && streams.length > 0) {
           const remoteStream = streams[0];
-          setRemoteStreams((prev) => new Map(prev.set(userId, remoteStream)));
+
+          // Log stream details
+          console.log(`Stream details for ${userId}:`, {
+            streamId: remoteStream.id,
+            active: remoteStream.active,
+            tracks: remoteStream.getTracks().map((t) => ({
+              kind: t.kind,
+              enabled: t.enabled,
+              readyState: t.readyState,
+              id: t.id,
+            })),
+          });
+
+          // Clear any existing timeout for this user
+          const existingTimeout = trackTimeouts.get(userId);
+          if (existingTimeout) {
+            clearTimeout(existingTimeout);
+          }
+
+          // Set a new timeout to update the stream after a brief delay
+          const timeout = setTimeout(() => {
+            console.log(`Setting remote stream for ${userId}`, remoteStream);
+            setRemoteStreams((prev) => {
+              const newMap = new Map(prev);
+              newMap.set(userId, remoteStream);
+              console.log(
+                `Updated remote streams map:`,
+                Array.from(newMap.keys())
+              );
+              return newMap;
+            });
+            trackTimeouts.delete(userId);
+          }, 200); // 200ms delay to batch multiple track events
+
+          trackTimeouts.set(userId, timeout);
+        } else {
+          console.warn(`No streams found in track event for ${userId}`);
         }
       });
 
@@ -113,22 +199,44 @@ export const PeerProvider = (props: React.PropsWithChildren<{}>) => {
       peer.addEventListener("connectionstatechange", () => {
         console.log(`Connection state for ${userId}:`, peer.connectionState);
 
-        // Clean up if connection fails
-        if (
-          peer.connectionState === "failed" ||
-          peer.connectionState === "disconnected"
-        ) {
-          console.log(
-            `Connection failed/disconnected for ${userId}, attempting to restart ICE`
-          );
-          peer.restartIce();
+        // Handle different connection states
+        if (peer.connectionState === "connected") {
+          console.log(`Successfully connected to ${userId}`);
+        } else if (peer.connectionState === "failed") {
+          console.log(`Connection failed for ${userId}`);
+          // Try restarting ICE to recover
+          setTimeout(() => {
+            if (peer.connectionState === "failed") {
+              console.log(`Attempting ICE restart for ${userId}`);
+              peer.restartIce();
+            }
+          }, 1000); // Wait 1 second before trying to restart
+        } else if (peer.connectionState === "disconnected") {
+          console.log(`Connection disconnected for ${userId}`);
+          // Wait a bit before considering it failed
+          setTimeout(() => {
+            if (peer.connectionState === "disconnected") {
+              console.log(
+                `Connection still disconnected for ${userId}, might need restart`
+              );
+            }
+          }, 3000);
         }
       });
 
       setPeerConnections((prev) => new Map(prev.set(userId, peer)));
+
+      // Check if there are any pending ICE candidates for this user
+      const pendingCandidates = pendingIceCandidates.get(userId) || [];
+      if (pendingCandidates.length > 0) {
+        console.log(
+          `Found ${pendingCandidates.length} pending ICE candidates for ${userId}, will process when remote description is set`
+        );
+      }
+
       return peer;
     },
-    [peerConnections]
+    [peerConnections, pendingIceCandidates]
   );
 
   const createOffer = useCallback(
@@ -154,11 +262,42 @@ export const PeerProvider = (props: React.PropsWithChildren<{}>) => {
     ) => {
       const peer = createPeerConnection(userId, localStream, onIceCandidate);
       await peer.setRemoteDescription(offer);
+      console.log(`Set remote description (offer) for ${userId}`);
+
+      // Process any pending ICE candidates
+      const pendingCandidates = pendingIceCandidates.get(userId) || [];
+      if (pendingCandidates.length > 0) {
+        console.log(
+          `Processing ${pendingCandidates.length} pending ICE candidates for ${userId}`
+        );
+
+        for (const candidate of pendingCandidates) {
+          try {
+            await peer.addIceCandidate(candidate);
+            console.log(
+              `Successfully added pending ICE candidate for ${userId}`
+            );
+          } catch (error) {
+            console.error(
+              `Error adding pending ICE candidate for ${userId}:`,
+              error
+            );
+          }
+        }
+
+        // Clear the pending candidates for this user
+        setPendingIceCandidates((prev) => {
+          const newMap = new Map(prev);
+          newMap.delete(userId);
+          return newMap;
+        });
+      }
+
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
       return answer;
     },
-    [createPeerConnection]
+    [createPeerConnection, pendingIceCandidates]
   );
 
   const setRemoteAns = useCallback(
@@ -166,9 +305,41 @@ export const PeerProvider = (props: React.PropsWithChildren<{}>) => {
       const peer = peerConnections.get(userId);
       if (peer) {
         await peer.setRemoteDescription(ans);
+        console.log(`Set remote description for ${userId}`);
+
+        // Process any pending ICE candidates immediately
+        const pendingCandidates = pendingIceCandidates.get(userId) || [];
+        if (pendingCandidates.length > 0) {
+          console.log(
+            `Processing ${pendingCandidates.length} pending ICE candidates for ${userId}`
+          );
+
+          for (const candidate of pendingCandidates) {
+            try {
+              await peer.addIceCandidate(candidate);
+              console.log(
+                `Successfully added pending ICE candidate for ${userId}`
+              );
+            } catch (error) {
+              console.error(
+                `Error adding pending ICE candidate for ${userId}:`,
+                error
+              );
+            }
+          }
+
+          // Clear the pending candidates for this user
+          setPendingIceCandidates((prev) => {
+            const newMap = new Map(prev);
+            newMap.delete(userId);
+            return newMap;
+          });
+
+          console.log(`Processed all pending ICE candidates for ${userId}`);
+        }
       }
     },
-    [peerConnections]
+    [peerConnections, pendingIceCandidates]
   );
 
   const sendStream = useCallback(
@@ -191,20 +362,40 @@ export const PeerProvider = (props: React.PropsWithChildren<{}>) => {
   const addIceCandidate = useCallback(
     async (userId: string, candidate: RTCIceCandidate) => {
       const peer = peerConnections.get(userId);
-      if (peer && peer.remoteDescription) {
+
+      // Add a small delay to allow for remote description to be set
+      if (peer && !peer.remoteDescription) {
+        // Wait a bit for remote description to be set
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      const updatedPeer = peerConnections.get(userId);
+      if (updatedPeer && updatedPeer.remoteDescription) {
         try {
-          await peer.addIceCandidate(candidate);
+          await updatedPeer.addIceCandidate(candidate);
           console.log(`Successfully added ICE candidate for ${userId}`);
         } catch (error) {
           console.error(`Error adding ICE candidate for ${userId}:`, error);
         }
       } else {
-        console.warn(
-          `Cannot add ICE candidate for ${userId}: peer connection not ready or no remote description`
+        // Queue the ICE candidate whether peer exists or not
+        // Peer connection might be created after ICE candidates start arriving
+        console.log(
+          `Queueing ICE candidate for ${userId} (${
+            updatedPeer
+              ? "remote description not set yet"
+              : "peer connection not created yet"
+          })`
         );
+        setPendingIceCandidates((prev) => {
+          const newMap = new Map(prev);
+          const existingCandidates = newMap.get(userId) || [];
+          newMap.set(userId, [...existingCandidates, candidate]);
+          return newMap;
+        });
       }
     },
-    [peerConnections]
+    [peerConnections, setPendingIceCandidates]
   );
 
   const removePeerConnection = useCallback(
@@ -218,6 +409,12 @@ export const PeerProvider = (props: React.PropsWithChildren<{}>) => {
           return newMap;
         });
         setRemoteStreams((prev) => {
+          const newMap = new Map(prev);
+          newMap.delete(userId);
+          return newMap;
+        });
+        // Clean up pending ICE candidates
+        setPendingIceCandidates((prev) => {
           const newMap = new Map(prev);
           newMap.delete(userId);
           return newMap;
@@ -243,6 +440,10 @@ export const PeerProvider = (props: React.PropsWithChildren<{}>) => {
     [peerConnections]
   );
 
+  const getPendingIceCandidates = useCallback(() => {
+    return pendingIceCandidates;
+  }, [pendingIceCandidates]);
+
   return (
     <PeerContext.Provider
       value={{
@@ -255,6 +456,7 @@ export const PeerProvider = (props: React.PropsWithChildren<{}>) => {
         remoteStreams,
         removePeerConnection,
         getConnectionStats,
+        getPendingIceCandidates,
       }}
     >
       {props.children}

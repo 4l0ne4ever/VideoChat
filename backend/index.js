@@ -28,6 +28,7 @@ io.on('connection', (socket) => {
         const {emailId, offer} = data;
         const fromEmail = socketToEmailMapping.get(socket.id);
         const socketId = emailToSocketMapping.get(emailId);
+        console.log(`Sending call-user to ${emailId}, socketId: ${socketId}, from: ${fromEmail}`);
         socket.to(socketId).emit("incomming-call", {from: fromEmail, offer});
     })
 
@@ -43,6 +44,46 @@ io.on('connection', (socket) => {
         const fromEmail = socketToEmailMapping.get(socket.id);
         const socketId = emailToSocketMapping.get(emailId);
         socket.to(socketId).emit('ice-candidate', {candidate, from: fromEmail});
+    })
+
+    // Handle mute state changes
+    socket.on('mute-state-changed', (data) => {
+        const {userId, isMuted} = data;
+        const fromEmail = socketToEmailMapping.get(socket.id);
+        const roomId = socketToRoomMapping.get(socket.id);
+        console.log(`User ${fromEmail} ${isMuted ? 'muted' : 'unmuted'} in room ${roomId}`);
+        // Broadcast to all users in the room except sender
+        socket.broadcast.to(roomId).emit('mute-state-changed', {userId: fromEmail, isMuted});
+    })
+
+    // Handle video state changes
+    socket.on('video-state-changed', (data) => {
+        const {userId, isVideoOff} = data;
+        const fromEmail = socketToEmailMapping.get(socket.id);
+        const roomId = socketToRoomMapping.get(socket.id);
+        console.log(`User ${fromEmail} video ${isVideoOff ? 'turned off' : 'turned on'} in room ${roomId}`);
+        // Broadcast to all users in the room except sender
+        socket.broadcast.to(roomId).emit('video-state-changed', {userId: fromEmail, isVideoOff});
+    })
+
+    // Handle explicit user disconnect (when clicking end call button)
+    socket.on('user-disconnect', () => {
+        const emailId = socketToEmailMapping.get(socket.id);
+        const roomId = socketToRoomMapping.get(socket.id);
+
+        if (emailId && roomId) {
+            console.log(`User ${emailId} explicitly disconnected from room ${roomId}`);
+            // Notify other users in the room that this user left
+            socket.broadcast.to(roomId).emit("user-left", {emailId});
+
+            // Clean up mappings
+            emailToSocketMapping.delete(emailId);
+            socketToEmailMapping.delete(socket.id);
+            socketToRoomMapping.delete(socket.id);
+        }
+        
+        // Acknowledge the disconnect
+        socket.emit('disconnect-acknowledged');
     })
 
     socket.on('disconnect', () => {
